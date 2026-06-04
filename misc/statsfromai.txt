@@ -1,0 +1,530 @@
+import de.hybris.platform.servicelayer.search.FlexibleSearchQuery
+import java.util.*
+import java.lang.String
+import java.lang.Long
+import org.apache.log4j.Logger
+import java.lang.Math.*
+import java.text.SimpleDateFormat
+import groovy.time.*
+import de.hybris.platform.cronjob.enums.CronJobResult
+import de.hybris.platform.cronjob.enums.CronJobStatus
+
+try {
+    this.STATS_LOG_BUFFER = []
+    logger = Logger.getLogger("MediaStatsScript.class")
+    
+    if (spring == null) {
+        throw new IllegalStateException("Spring context is null in script execution context")
+    }
+    
+    logMessage("STARTED at " + new Date().toString(), null)
+    logLineSeparator()
+    
+    flexibleSearchService = spring.getBean("flexibleSearchService")
+    if (flexibleSearchService == null) {
+        throw new IllegalStateException("flexibleSearchService bean not found")
+    }
+    
+    def startTime = new Date()
+    
+    // ============ CATEGORY STATISTICS ============
+    logMessage("Calculating CATEGORY Statistics...", null)
+    logLineSeparator()
+    
+    Long totalCategories = getTotalCategoryCount()
+    logMessage("Total Categories", totalCategories)
+    
+    // Get media counts at category level - matching extraction script categories
+    List<String> categoryMediaAttributes = ['thumbnail', 'picture', 'normal', 'thumbnails', 'detail', 'logo', 'data_sheet', 'others']
+    
+    for (attribute in categoryMediaAttributes) {
+        Long count = getCategoryMediaCount(attribute)
+        logMessage("CATEGORY | " + attribute, count)
+    }
+    
+    logLineSeparator()
+    
+    // ============ PRODUCT STATISTICS ============
+    logMessage("Calculating PRODUCT Statistics...", null)
+    logLineSeparator()
+    
+    Long totalProducts = getTotalProductCount()
+    logMessage("Total Products", totalProducts)
+    
+    // Get counts for direct single-value attributes
+    List<String> directProductAttributes = ['thumbnail', 'picture', 'logo', 'data_sheet', 'others', 'videos', 'mobileImages']
+    
+    Map<String, Long> directAttributeMediaPkCounts = [:]
+    
+    for (attribute in directProductAttributes) {
+        Long pksReferencedByProducts = getProductMediaPksReferencedCount(attribute)
+        Long pksExistingInMediaTable = getUsedMediaCountForAttribute(attribute)
+        
+        logMessage("PRODUCT | " + attribute, pksExistingInMediaTable)
+        directAttributeMediaPkCounts.put(attribute, pksExistingInMediaTable)
+    }
+    
+    // Get counts for collection attributes
+    List<String> collectionProductAttributes = ['normal', 'thumbnails', 'detail']
+    
+    Map<String, Long> collectionAttributeMediaPkCounts = [:]
+    
+    for (attribute in collectionProductAttributes) {
+        Long pksExistingInMediaTable = getUsedMediaCountForCollectionAttribute(attribute)
+        logMessage("PRODUCT | " + attribute, pksExistingInMediaTable)
+        collectionAttributeMediaPkCounts.put(attribute, pksExistingInMediaTable)
+    }
+    
+    // Gallery/Container specific counts
+    Long galleryContainerCount = getProductGalleryContainerCount()
+    logMessage("PRODUCT | galleryImages containers", galleryContainerCount)
+    
+    Long galleryMediaCount = getUsedMediaCountForGallery()
+    logMessage("PRODUCT | galleryImages medias", galleryMediaCount)
+    
+    logLineSeparator()
+    
+    // ============ TOTAL PRODUCT MEDIAS (CONSOLIDATION) ============
+    Set<String> allDistinctMediaPks = getAllDistinctProductMediaPks()
+    Long allDistinctProductMedias = allDistinctMediaPks.size().toLong()
+    logMessage("PRODUCT | ALL DISTINCT PRODUCT MEDIAS", allDistinctProductMedias)
+    
+    logLineSeparator()
+    
+    // ============ MEDIA TABLE STATISTICS ============
+    Long totalMediaCount = getTotalMediaCount()
+    logMessage("TOTAL MEDIA COUNT", totalMediaCount)
+    
+    // ============ UNUSED MEDIA COUNT ============
+    // Unused = Total Media in table - Media actually used by products (and exists in Media table)
+    Long unusedMediaCount = totalMediaCount - allDistinctProductMedias
+    logMessage("UNUSED MEDIA COUNT", unusedMediaCount)
+    
+    logLineSeparator()
+    
+    // ============ EXECUTION TIME ============
+    def endTime = new Date()
+    TimeDuration duration = TimeCategory.minus(endTime, startTime)
+    logMessage("DURATION", duration.toString())
+    
+    // ============ WRITE LOG ============
+    writeStatsLog(this.STATS_LOG_BUFFER, "log_media_stats")
+    
+    return [CronJobResult.SUCCESS, CronJobStatus.FINISHED]
+    
+} catch (Exception e) {
+    logger.error("MediaStatsScript | FATAL ERROR", e)
+    logMessage("ERROR: " + e.message, null)
+    
+    try {
+        writeStatsLog(this.STATS_LOG_BUFFER, "log_media_stats")
+    } catch (ignored) {}
+    
+    return [CronJobResult.ERROR, CronJobStatus.ABORTED]
+}
+
+// ============ CATEGORY QUERIES ============
+
+def getTotalCategoryCount() {
+    String query = "SELECT COUNT(DISTINCT {pk}) FROM {Category}"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(Long.class))
+    def result = flexibleSearchService.search(fsq)
+    return result.getResult().get(0) ?: 0L
+}
+
+def getCategoryMediaCount(String mediaAttribute) {
+    String query = "SELECT COUNT(DISTINCT {pk}) FROM {Category} WHERE {" + mediaAttribute + "} IS NOT NULL"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(Long.class))
+    def result = flexibleSearchService.search(fsq)
+    return result.getResult().get(0) ?: 0L
+}
+
+// ============ PRODUCT QUERIES ============
+
+def getTotalProductCount() {
+    String query = "SELECT COUNT(DISTINCT {pk}) FROM {Product}"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(Long.class))
+    def result = flexibleSearchService.search(fsq)
+    return result.getResult().get(0) ?: 0L
+}
+
+def getProductMediaPksReferencedCount(String mediaAttribute) {
+    /**
+     * Gets all distinct PKs referenced by products in a direct attribute
+     * Does NOT check if they exist in Media table
+     */
+    String query = "SELECT DISTINCT {" + mediaAttribute + "} FROM {Product} WHERE {" + mediaAttribute + "} IS NOT NULL"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(String.class))
+    def result = flexibleSearchService.search(fsq)
+    def referencedPks = result.getResult().findAll { it != null && !it.isEmpty() }
+    return referencedPks.size().toLong()
+}
+
+def getProductGalleryContainerCount() {
+    String query = "SELECT COUNT(DISTINCT {galleryImages}) FROM {Product} WHERE {galleryImages} IS NOT NULL"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(Long.class))
+    def result = flexibleSearchService.search(fsq)
+    return result.getResult().get(0) ?: 0L
+}
+
+// ============ USED MEDIA QUERIES (BASED ON EXTRACTION SCRIPT) ============
+
+def getUsedMediaCountForAttribute(String attributeName) {
+    /**
+     * For direct reference attributes: thumbnail, picture, logo, data_sheet, others, videos, mobileImages
+     * 
+     * Returns count of media PKs that:
+     * 1. Are referenced by products in this attribute
+     * 2. Actually exist in the Media table
+     * 
+     * This matches the extraction script's getProductThumbnail(), getProductPicture() logic
+     */
+    String query = """
+        SELECT COUNT(DISTINCT {m.pk}) FROM {Media AS m}
+        WHERE {m.pk} IN (
+            SELECT DISTINCT {""" + attributeName + """} FROM {Product} 
+            WHERE {""" + attributeName + """} IS NOT NULL
+        )
+    """
+    
+    try {
+        FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+        fsq.setResultClassList(Collections.singletonList(Long.class))
+        def result = flexibleSearchService.search(fsq)
+        return result.getResult().get(0) ?: 0L
+    } catch (Exception e) {
+        logger.warn("getUsedMediaCountForAttribute failed for $attributeName: " + e.message)
+        return getUsedMediaCountForAttributeAlternative(attributeName)
+    }
+}
+
+def getUsedMediaCountForAttributeAlternative(String attributeName) {
+    /**
+     * Fallback: Fetch all referenced PKs and check if they exist in Media table
+     */
+    String query = "SELECT DISTINCT {" + attributeName + "} FROM {Product} WHERE {" + attributeName + "} IS NOT NULL"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(String.class))
+    def result = flexibleSearchService.search(fsq)
+    def referencedPks = result.getResult().findAll { it != null && !it.isEmpty() }
+    
+    if (referencedPks.isEmpty()) {
+        return 0L
+    }
+    
+    Long count = 0L
+    int queryThresholdInClause = 10000
+    int pageSize = Math.min(queryThresholdInClause, referencedPks.size())
+    int totalPages = Math.ceil(referencedPks.size() / (double) pageSize).intValue()
+    
+    for (int page = 1; page <= totalPages; page++) {
+        int startIndex = (page - 1) * pageSize
+        int endIndex = Math.min(startIndex + pageSize, referencedPks.size())
+        List<String> pagePks = referencedPks.subList(startIndex, endIndex)
+        
+        String countQuery = "SELECT COUNT(DISTINCT {pk}) FROM {Media} WHERE {pk} IN (?pks)"
+        FlexibleSearchQuery countFsq = new FlexibleSearchQuery(countQuery)
+        countFsq.addQueryParameter("pks", pagePks)
+        countFsq.setResultClassList(Collections.singletonList(Long.class))
+        def countResult = flexibleSearchService.search(countFsq)
+        count += countResult.getResult().get(0) ?: 0L
+    }
+    
+    return count
+}
+
+def getUsedMediaCountForCollectionAttribute(String attributeName) {
+    /**
+     * For collection attributes: normal, thumbnails, detail
+     * 
+     * These store multiple PKs as comma-separated strings (e.g., "pk1,pk2,pk3")
+     * 
+     * This matches the extraction script's getProductMediaPkFromMediaCollection() logic
+     */
+    String query = """
+        SELECT COUNT(DISTINCT {m.pk}) FROM {Media AS m}
+        WHERE {m.pk} IN (
+            SELECT DISTINCT {""" + attributeName + """} FROM {Product} 
+            WHERE {""" + attributeName + """} IS NOT NULL
+        )
+    """
+    
+    try {
+        FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+        fsq.setResultClassList(Collections.singletonList(Long.class))
+        def result = flexibleSearchService.search(fsq)
+        return result.getResult().get(0) ?: 0L
+    } catch (Exception e) {
+        logger.warn("getUsedMediaCountForCollectionAttribute failed for $attributeName: " + e.message)
+        return getUsedMediaCountForCollectionAttributeAlternative(attributeName)
+    }
+}
+
+def getUsedMediaCountForCollectionAttributeAlternative(String attributeName) {
+    /**
+     * Fallback for collection attributes:
+     * 1. Fetch all comma-separated strings
+     * 2. Split them into individual PKs
+     * 3. Check which exist in Media table (handles the split logic from extraction script)
+     */
+    String query = "SELECT DISTINCT {" + attributeName + "} FROM {Product} WHERE {" + attributeName + "} IS NOT NULL"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(String.class))
+    def result = flexibleSearchService.search(fsq)
+    def collectionValues = result.getResult()
+    
+    Set<String> allPks = new HashSet<>()
+    
+    for (item in collectionValues) {
+        if (item?.trim()) {
+            def pkList = item.split(',')
+            allPks.addAll(pkList.collect { it.trim() }.findAll { !it.isEmpty() && !it.startsWith('#') })
+        }
+    }
+    
+    if (allPks.isEmpty()) {
+        return 0L
+    }
+    
+    Long count = 0L
+    int queryThresholdInClause = 10000
+    int pageSize = Math.min(queryThresholdInClause, allPks.size())
+    List<String> pkList = allPks.toList()
+    int totalPages = Math.ceil(pkList.size() / (double) pageSize).intValue()
+    
+    for (int page = 1; page <= totalPages; page++) {
+        int startIndex = (page - 1) * pageSize
+        int endIndex = Math.min(startIndex + pageSize, pkList.size())
+        List<String> pagePks = pkList.subList(startIndex, endIndex)
+        
+        String countQuery = "SELECT COUNT(DISTINCT {pk}) FROM {Media} WHERE {pk} IN (?pks)"
+        FlexibleSearchQuery countFsq = new FlexibleSearchQuery(countQuery)
+        countFsq.addQueryParameter("pks", pagePks)
+        countFsq.setResultClassList(Collections.singletonList(Long.class))
+        def countResult = flexibleSearchService.search(countFsq)
+        count += countResult.getResult().get(0) ?: 0L
+    }
+    
+    return count
+}
+
+def getUsedMediaCountForGallery() {
+    /**
+     * For galleryImages attribute (MediaContainers)
+     * 
+     * Counts distinct media that are:
+     * 1. Inside MediaContainers referenced by products
+     * 2. Actually exist in Media table
+     * 
+     * This matches the extraction script's getProductMediaPkFromMediaContainer() logic
+     */
+    String query = """
+        SELECT COUNT(DISTINCT {med.pk}) FROM {Media AS med}
+        WHERE {med.mediaContainer} IN (
+            SELECT DISTINCT {galleryImages} FROM {Product}
+            WHERE {galleryImages} IS NOT NULL
+        )
+    """
+    
+    try {
+        FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+        fsq.setResultClassList(Collections.singletonList(Long.class))
+        def result = flexibleSearchService.search(fsq)
+        return result.getResult().get(0) ?: 0L
+    } catch (Exception e) {
+        logger.warn("getUsedMediaCountForGallery failed: " + e.message)
+        return getUsedMediaCountForGalleryAlternative()
+    }
+}
+
+def getUsedMediaCountForGalleryAlternative() {
+    /**
+     * Fallback for gallery:
+     * Get all gallery container PKs, then count media inside them that exist
+     */
+    String containerQuery = "SELECT DISTINCT {galleryImages} FROM {Product} WHERE {galleryImages} IS NOT NULL"
+    FlexibleSearchQuery containerFsq = new FlexibleSearchQuery(containerQuery)
+    containerFsq.setResultClassList(Collections.singletonList(String.class))
+    def containerResult = flexibleSearchService.search(containerFsq)
+    def containerPks = containerResult.getResult().findAll { it != null && !it.isEmpty() }
+    
+    if (containerPks.isEmpty()) {
+        return 0L
+    }
+    
+    Long count = 0L
+    int queryThresholdInClause = 10000
+    int pageSize = Math.min(queryThresholdInClause, containerPks.size())
+    int totalPages = Math.ceil(containerPks.size() / (double) pageSize).intValue()
+    
+    for (int page = 1; page <= totalPages; page++) {
+        int startIndex = (page - 1) * pageSize
+        int endIndex = Math.min(startIndex + pageSize, containerPks.size())
+        List<String> pageContainerPks = containerPks.subList(startIndex, endIndex)
+        
+        String mediaQuery = """
+            SELECT COUNT(DISTINCT {med.pk}) FROM {Media AS med}
+            WHERE {med.mediaContainer} IN (?containerPks)
+        """
+        FlexibleSearchQuery mediaFsq = new FlexibleSearchQuery(mediaQuery)
+        mediaFsq.addQueryParameter("containerPks", pageContainerPks)
+        mediaFsq.setResultClassList(Collections.singletonList(Long.class))
+        def mediaResult = flexibleSearchService.search(mediaFsq)
+        count += mediaResult.getResult().get(0) ?: 0L
+    }
+    
+    return count
+}
+
+def getAllDistinctProductMediaPks() {
+    /**
+     * Consolidates all media PKs from all sources (matching extraction script consolidation logic)
+     * 
+     * Returns a Set of all DISTINCT media PKs that:
+     * 1. Are referenced by products in ANY attribute
+     * 2. Actually exist in the Media table
+     * 3. Are not null, empty, or comment lines (startsWith '#')
+     * 
+     * This is the SINGLE SOURCE OF TRUTH for "used" media count
+     */
+    Set<String> allMediaPks = new HashSet<>()
+    
+    // Get all direct attribute PKs
+    List<String> directAttributes = ['thumbnail', 'picture', 'logo', 'data_sheet', 'others', 'videos', 'mobileImages']
+    
+    for (attribute in directAttributes) {
+        String query = "SELECT DISTINCT {" + attribute + "} FROM {Product} WHERE {" + attribute + "} IS NOT NULL"
+        FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+        fsq.setResultClassList(Collections.singletonList(String.class))
+        def result = flexibleSearchService.search(fsq)
+        def pks = result.getResult().findAll { it != null && !it.isEmpty() && !it.startsWith('#') }
+        allMediaPks.addAll(pks)
+    }
+    
+    // Get all collection attribute PKs (split comma-separated)
+    List<String> collectionAttributes = ['normal', 'thumbnails', 'detail']
+    
+    for (attribute in collectionAttributes) {
+        String query = "SELECT DISTINCT {" + attribute + "} FROM {Product} WHERE {" + attribute + "} IS NOT NULL"
+        FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+        fsq.setResultClassList(Collections.singletonList(String.class))
+        def result = flexibleSearchService.search(fsq)
+        def collectionValues = result.getResult()
+        
+        for (item in collectionValues) {
+            if (item?.trim()) {
+                def pkList = item.split(',')
+                allMediaPks.addAll(pkList.collect { it.trim() }.findAll { !it.isEmpty() && !it.startsWith('#') })
+            }
+        }
+    }
+    
+    // Get all gallery media PKs
+    String containerQuery = "SELECT DISTINCT {galleryImages} FROM {Product} WHERE {galleryImages} IS NOT NULL"
+    FlexibleSearchQuery containerFsq = new FlexibleSearchQuery(containerQuery)
+    containerFsq.setResultClassList(Collections.singletonList(String.class))
+    def containerResult = flexibleSearchService.search(containerFsq)
+    def containerPks = containerResult.getResult().findAll { it != null && !it.isEmpty() && !it.startsWith('#') }
+    
+    if (!containerPks.isEmpty()) {
+        int queryThresholdInClause = 10000
+        int pageSize = Math.min(queryThresholdInClause, containerPks.size())
+        int totalPages = Math.ceil(containerPks.size() / (double) pageSize).intValue()
+        
+        for (int page = 1; page <= totalPages; page++) {
+            int startIndex = (page - 1) * pageSize
+            int endIndex = Math.min(startIndex + pageSize, containerPks.size())
+            List<String> pageContainerPks = containerPks.subList(startIndex, endIndex)
+            
+            String mediaQuery = "SELECT DISTINCT {med.pk} FROM {MediaContainer AS cont JOIN Media AS med ON {med.mediaContainer} = {cont.pk}} WHERE {cont.pk} IN (?containerPks)"
+            FlexibleSearchQuery mediaFsq = new FlexibleSearchQuery(mediaQuery)
+            mediaFsq.addQueryParameter("containerPks", pageContainerPks)
+            mediaFsq.setResultClassList(Collections.singletonList(String.class))
+            def mediaResult = flexibleSearchService.search(mediaFsq)
+            def mediaPks = mediaResult.getResult().findAll { it != null && !it.isEmpty() && !it.startsWith('#') }
+            allMediaPks.addAll(mediaPks)
+        }
+    }
+    
+    // Remove nulls, empty strings, and comment lines
+    allMediaPks.removeAll([null])
+    allMediaPks.removeAll { it.isEmpty() || it.trim().isEmpty() }
+    allMediaPks.removeAll { it.startsWith('#') }
+    
+    // Now verify that all these PKs actually exist in Media table
+    Set<String> verifiedMediaPks = new HashSet<>()
+    
+    if (!allMediaPks.isEmpty()) {
+        int queryThresholdInClause = 10000
+        int pageSize = Math.min(queryThresholdInClause, allMediaPks.size())
+        List<String> pkList = allMediaPks.toList()
+        int totalPages = Math.ceil(pkList.size() / (double) pageSize).intValue()
+        
+        for (int page = 1; page <= totalPages; page++) {
+            int startIndex = (page - 1) * pageSize
+            int endIndex = Math.min(startIndex + pageSize, pkList.size())
+            List<String> pagePks = pkList.subList(startIndex, endIndex)
+            
+            String verifyQuery = "SELECT DISTINCT {pk} FROM {Media} WHERE {pk} IN (?pks)"
+            FlexibleSearchQuery verifyFsq = new FlexibleSearchQuery(verifyQuery)
+            verifyFsq.addQueryParameter("pks", pagePks)
+            verifyFsq.setResultClassList(Collections.singletonList(String.class))
+            def verifyResult = flexibleSearchService.search(verifyFsq)
+            def existingPks = verifyResult.getResult().findAll { it != null && !it.isEmpty() }
+            verifiedMediaPks.addAll(existingPks)
+        }
+    }
+    
+    return verifiedMediaPks
+}
+
+def getTotalMediaCount() {
+    String query = "SELECT COUNT(DISTINCT {pk}) FROM {Media}"
+    FlexibleSearchQuery fsq = new FlexibleSearchQuery(query)
+    fsq.setResultClassList(Collections.singletonList(Long.class))
+    def result = flexibleSearchService.search(fsq)
+    return result.getResult().get(0) ?: 0L
+}
+
+// ============ LOGGING UTILITIES ============
+
+def logMessage(String message, Long number = null) {
+    String output
+    if (number != null) {
+        Formatter fmt = new Formatter()
+        fmt.format("%-60s%-15s", "prodMediaStatsScript | " + message, number)
+        output = fmt.toString()
+    } else {
+        output = "prodMediaStatsScript | " + message
+    }
+    
+    println output
+    logger.warn(output)
+    STATS_LOG_BUFFER.add(output)
+}
+
+def logLineSeparator() {
+    String separator = "prodMediaStatsScript | " + "____________________________________________________"
+    println separator
+    logger.warn(separator)
+    STATS_LOG_BUFFER.add(separator)
+}
+
+def writeStatsLog(List<String> logLines, String fileName) {
+    try {
+        String timestamp = new SimpleDateFormat("dd-MMM-yyyy-HH-mm-ss").format(new Date())
+        String logFilePath = "/tmp/" + fileName + "_" + timestamp + ".log"
+        
+        File logFile = new File(logFilePath)
+        logFile.text = logLines.join("\n")
+        
+        println "Log file written to: " + logFilePath
+    } catch (Exception e) {
+        logger.error("Failed to write stats log: " + e.message)
+    }
+}
