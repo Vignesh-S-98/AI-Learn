@@ -37,16 +37,25 @@ def check_future_hrs(avg_hrs_needed):
     print(f"You need to work for {hrs:.0f}:{min:.0f}:{sec:.0f} for {to_work - worked_days} each day")
 
 if __name__ == '__main__':
-    print("Please enter the number of the feature you want to utilize")
-    option = input("What is the feature you want to utilize : \n1. Calculate numbers of days to report to office \n2. Calculate Avg time worked in the office \n3. Calculate the time needed to log in the ofc\n")
-    match(option):
-        case ("1"):
-            cal_work_days()
-        case ("2"):
-            office_duration_cal()
-        case ("3"):
-            avg_hrs_needed = int(input("Enter the average hr you need to maintain\n"))
-            check_future_hrs(avg_hrs_needed)
-        case _:
-            print("Please enter a proper response") 
+    start = True
+    while start:
+        print("Please enter the number of the feature you want to utilize")
+        option = input("What is the feature you want to utilize : \n1. Calculate numbers of days to report to office \n2. Calculate Avg time worked in the office \n3. Calculate the time needed to log in the ofc\n4.Exit application\n")
+        match(option):
+            case ("1"):
+                cal_work_days()
+                print("-"*10+" back to main menu ".upper()+"-"*10)
+            case ("2"):
+                office_duration_cal()
+                print("-"*10+" back to main menu ".upper()+"-"*10)
+            case ("3"):
+                avg_hrs_needed = int(input("Enter the average hr you need to maintain\n"))
+                check_future_hrs(avg_hrs_needed)
+                print("-"*10+" back to main menu ".upper()+"-"*10)
+            case ("4"):
+                print("-"*10+"Closing the application".upper()+"-"*10)
+                start = False
+            case _:
+                print("Please enter a proper response") 
+                print("-"*10+" back to main menu ".upper()+"-"*10)
 
